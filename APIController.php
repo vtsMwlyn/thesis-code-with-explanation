@@ -13,21 +13,29 @@ use Illuminate\Support\Facades\DB;
 
 class APIController extends Controller
 {
+    // ===== HANDLE PENGIRIMAN DATA SENSOR ===== //
     public function store_sensor_data(Request $request){
+        // FLOW KALO NORMAL
         try {
+            // Jalankan ini semua jika device yang ngirim datanya juga ngirim API secret key
             if($request->secret == 'VTS_Meowlynna-2312'){
+                // Make sure data ga masuk database dulu kalo ada error
                 DB::beginTransaction();
 
-                // Retrieve data
+                // Retrieve data dari pengirim
                 $temp = $request->temp;
                 $ph = $request->ph;
                 $turbidity = $request->turbidity;
                 $tds = $request->tds;
                 $location = $request->location ?? null;
 
-                // Find parameters that may cause the decreasing of the quality
+                
+                // ===== CARI PARAMETER KUALITAS AIR YANG KIRA-KIRA BIKIN KUALITAS AIR JADI JELEK =====
+
+                // Buat nyimpen impostornya
                 $out_of_standards = [];
 
+                // Per item cek satu-satu, kalo keluar dari standar WHO, masukin ke list impostor
                 if($temp < 12 || $temp > 25){
                     $out_of_standards[] = 'suhu';
                 }
@@ -44,7 +52,7 @@ class APIController extends Controller
                     $out_of_standards[] = 'jumlah padatan terlarut';
                 }
 
-                // Text formatting
+                // Text formatting biar nanti bentuknya jadi string dan dipisah koma buat ditampilin ke dashboard
                 $sus_parameters = '';
 
                 if (count($out_of_standards) > 1) {
@@ -54,14 +62,17 @@ class APIController extends Controller
                     $sus_parameters = implode('', $out_of_standards);
                 }
 
-                // Predict the water quality
+                // ===== PANGGIL KNN BUAT KLASIFIKASI KUALITAS AIR
                 $quality = KNN::predict($temp, $ph, $turbidity, $tds);
 
-                // Retrieve last data
+                // ===== MEKANISME GENERATE WARNING ===== //
+
+                // Ambil data water quality terakhir
                 $latest_sensor_data = WaterQuality::latest()->first();
 
-                // Compare: If the quality turned to bad or very bad, then generate warning
+                // Kalo awalnya excellent, very good, atau good berarti kita generate warning. Kalo ngga yo ndak usah.
                 if($latest_sensor_data && !in_array($latest_sensor_data?->quality, ['Bad', 'Very Bad']) && in_array($quality, ['Bad', 'Very Bad'])){
+                    // Translate dulu ke bahasa Indonesia
                     $translated = '';
 
                     if($quality == 'Bad'){
@@ -70,6 +81,7 @@ class APIController extends Controller
                         $translated = 'Sangat Buruk';
                     }
 
+                    // Generate data warning-nya
                     Warning::create([
                         'date_and_time' => Carbon::now()->format('Y-m-d H:i:s'),
                         'message' => 'Terjadi penurunan kualitas air sungai di lokasi ' . $location . ' ke tingkat <strong>"' . $translated .'"</strong>. Beberapa parameter seperti <strong>' . $sus_parameters . '</strong> diduga menyebabkan penurunan.',
@@ -77,7 +89,7 @@ class APIController extends Controller
                     ]);
                 }
 
-                // Finally, store the sensor and quality data
+                // ===== SIMPEN DATA WATER QUALITY + PENGUKURAN SENSOR ===== //
                 WaterQuality::create([
                     'date_and_time' => Carbon::now()->format('Y-m-d H:i:s'),
                     'location' => $location,
@@ -90,40 +102,58 @@ class APIController extends Controller
                     'quality' => $quality,
                 ]);
 
+                // Kalo udah sampe sini dan ga ada error baru operasi database-nya dilakuin
                 DB::commit();
 
-                // Give success response back to the data sender
+                // Kasih tau kalo proses kirim datanya berhasil
                 return response()->json(['success' => true, 'message' => 'Successfully stored the sensor data!'], 200);
             }
             else {
+                // Kalo dari awal ga ada API secret key, reject
                 abort(401);
             }
         }
+
+        // KALO GAGAL
         catch(Exception $e){
+            // Kalo ada kegagalan selama proses, operasi database semuanya batalin
             DB::rollback();
 
+            // Kasih tau kalo proses kirim datanya bermasalah
             return response()->json(['success' => false, 'message' => 'Error occured: ' . $e->getMessage()], 500);
         }
     }
 
+    // ===== HANDLE PENGIRIMAN DATA DETEKSI ===== //
     public function store_detection_data(Request $request){
-        if($request->secret == 'VTS_Meowlynna-2312'){
-            // Store detection photo
-            $path = $request->file('image')->store('detections');
+        // FLOW NORMAL
+        try {
+            // Lakukanlah hanya ketika yang ngirim data ngasih API secret key
+            if($request->secret == 'VTS_Meowlynna-2312'){
+                // Simpen foto yang dikirim
+                $path = $request->file('image')->store('detections');
 
-            // Store detection data to database
-            GarbageDetection::create([
-                'date_and_time' => $request->date_and_time,
-                'location' => $request->location ?? null,
-                'number' => $request->number,
-                'image_path' => $path,
-            ]);
+                // Simpen data deteksi ke database
+                GarbageDetection::create([
+                    'date_and_time' => $request->date_and_time,
+                    'location' => $request->location ?? null,
+                    'number' => $request->number,
+                    'image_path' => $path,
+                ]);
 
-            // Give success response back to the data sender
-            return response()->json(['success' => true, 'message' => 'Successfully stored the detection data!'], 200);
+                // Kasih tau kalo berhasil
+                return response()->json(['success' => true, 'message' => 'Successfully stored the detection data!'], 200);
+            }
+            else {
+                // Reject kalo ga ada API secret key
+                abort(401);
+            }
         }
-        else {
-            abort(401);
+
+        // 
+        catch(Exception $e){
+            // Kasih tau kalo proses kirim datanya bermasalah
+            return response()->json(['success' => false, 'message' => 'Error occured: ' . $e->getMessage()], 500);
         }
     }
 }
